@@ -1,0 +1,4 @@
+PySide6>=6.11
+opencv-contrib-python>=4.9
+pygrabber>=0.2
+onnxruntime>=1.29

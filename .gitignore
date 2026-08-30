@@ -1,0 +1,26 @@
+# 빌드 산출물 — exe 하나가 120MB 라 GitHub 의 100MB 파일 제한을 넘는다.
+# 배포본은 Releases 로 올린다.
+dist/
+build/
+*.spec
+
+# 파이썬
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 사용자 설정과 테스트 부산물
+settings.json
+_smoke_settings.json
+_migrate.json
+
+# 작업 중 임시 파일 (검증 스크립트·렌더 결과)
+_*.py
+_*.txt
+_*.png
+
+# 팀 검토 산출물 (내부용)
+_pm_review*.md
+_approval*.md
