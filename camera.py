@@ -25,6 +25,7 @@ CAP_MSMF = getattr(cv2, "CAP_MSMF", 1400)
 # 장치도 있어서, 하나만 쓰면 그런 장치는 통째로 못 쓴다. MSMF를 먼저 두는 것은
 # 지연이 더 낮고 대부분의 물리 카메라에서 잘 되기 때문이다.
 CAPTURE_BACKENDS = (CAP_MSMF, CAP_DSHOW)
+FALLBACK_SCAN_LIMIT = 10  # COM 열거 실패 시 직접 열어 볼 인덱스 수
 
 
 class LatestFrame:
@@ -268,6 +269,18 @@ def _relax_comtypes_typelib_check() -> None:
     """
     if not ("__compiled__" in globals() or getattr(sys, "frozen", False)):
         return
+
+    # 이것이 실제로 듣는 우회다. comtypes 의 _check_version 은 함수 안에서
+    # `if not hasattr(sys, "frozen")` 일 때만 mtime 을 본다. 속성 하나만 두면
+    # 원본 함수가 스스로 검사를 건너뛴다.
+    #
+    # 아래 몽키패치만으로는 부족했다 — Nuitka 로 컴파일된 comtypes.gen 모듈이
+    # 원본 _check_version 참조를 이미 붙들고 있어서 모듈 속성을 바꿔도 닿지
+    # 않는다. 0.1.10 의 exe 가 정확히 그래서 실패했고, 장치 이름이 "카메라 N"
+    # 으로 떨어졌다. 그래도 패치는 남겨 둔다 — 두 경로 다 막아 둘 이유가 있다.
+    if not hasattr(sys, "frozen"):
+        sys.frozen = True
+
     try:
         import comtypes
         from comtypes import _tlib_version_checker
@@ -296,8 +309,13 @@ def list_cameras(active_index: int | None = None) -> list[tuple[int, str]]:
     except Exception:
         pass  # pygrabber 미설치/COM 실패 → 인덱스 탐색으로 대체
 
+    # COM 열거가 실패했을 때만 오는 길이다. 범위를 5 로 두면 가상 카메라를
+    # 여러 개 깐 PC(OBS·PRISM·Insta360 …)에서 뒤쪽 장치가 통째로 안 보인다.
+    # 실제로 이 PC 는 장치가 6 개고 Insta360 이 5 번이라 목록에서 사라졌다.
+    # 한 칸마다 장치를 직접 열어 보므로 공짜가 아니다 — 그래서 무한정 늘리지
+    # 않고 흔한 구성을 덮는 선에서 멈춘다.
     found: list[tuple[int, str]] = []
-    for i in range(5):
+    for i in range(FALLBACK_SCAN_LIMIT):
         if i == active_index:
             # 현재 사용 중인 장치는 다시 열 수 없으므로 탐색하지 않고 추가
             found.append((i, "카메라 %d" % i))

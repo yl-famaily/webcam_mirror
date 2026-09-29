@@ -1,6 +1,7 @@
 """Deterministic camera pipeline tests; never opens a physical webcam."""
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+import sys
 import time
 import unittest
 from unittest.mock import patch
@@ -280,5 +281,73 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(widths, sorted(widths, reverse=True), (view, widths))
             self.assertGreaterEqual(widths[0], max(view),
                                     ("칠해지는 픽셀보다 낮게 계산한다", view, widths))
+
+    def test_fallback_scan_sees_devices_past_index_four(self):
+        """COM 열거가 실패해도 뒤쪽 인덱스의 장치가 보여야 한다.
+
+        가상 카메라를 여러 개 깔면(OBS·PRISM·Insta360 …) 실제 웹캠이 5번 이후로
+        밀린다. 범위를 5로 두었더니 그 장치들이 목록에서 통째로 사라졌다.
+        """
+        present = {0, 5, 7}
+
+        class ScanCapture:
+            def __init__(self, index, _backend=None):
+                self.index = index
+            def isOpened(self): return self.index in present
+            def release(self): pass
+
+        class EmptyGraph:                     # COM 은 되지만 목록이 비는 경우
+            def get_input_devices(self): return []
+
+        with patch("pygrabber.dshow_graph.FilterGraph", EmptyGraph),                 patch("camera.cv2.VideoCapture", ScanCapture):
+            found = camera.list_cameras()
+        self.assertEqual([i for i, _ in found], [0, 5, 7], found)
+        self.assertTrue(all(name for _, name in found))
+
+    def test_fallback_scan_keeps_the_device_already_in_use(self):
+        """쓰고 있는 장치는 다시 열 수 없으므로 탐색하지 않고 넣는다."""
+        class NeverOpens:
+            def __init__(self, *_a): pass
+            def isOpened(self): return False
+            def release(self): pass
+
+        class EmptyGraph:
+            def get_input_devices(self): return []
+
+        with patch("pygrabber.dshow_graph.FilterGraph", EmptyGraph),                 patch("camera.cv2.VideoCapture", NeverOpens):
+            found = camera.list_cameras(active_index=6)
+        self.assertEqual([i for i, _ in found], [6], found)
+
+    def test_frozen_build_disables_the_comtypes_mtime_check(self):
+        """빌드된 exe 에서 comtypes 의 타입라이브러리 mtime 검사를 꺼야 한다.
+
+        comtypes 의 _check_version 은 함수 안에서 sys.frozen 이 없을 때만 mtime
+        을 본다. 0.1.10 은 _check_version 을 갈아끼우는 방식만 썼는데, Nuitka 가
+        컴파일한 comtypes.gen 모듈이 원본 참조를 붙들고 있어 닿지 않았다.
+        그래서 exe 에서 장치 이름이 전부 "카메라 N" 으로 떨어졌다.
+        """
+        had_frozen = hasattr(sys, "frozen")
+        previous = getattr(sys, "frozen", None)
+        if had_frozen:
+            del sys.frozen
+        camera.__dict__["__compiled__"] = True      # Nuitka 빌드인 척
+        try:
+            camera._relax_comtypes_typelib_check()
+            self.assertTrue(getattr(sys, "frozen", False),
+                            "sys.frozen 이 없으면 comtypes 가 mtime 을 본다")
+        finally:
+            camera.__dict__.pop("__compiled__", None)
+            if had_frozen:
+                sys.frozen = previous
+            else:
+                if hasattr(sys, "frozen"):
+                    del sys.frozen
+
+    def test_relax_is_a_no_op_when_running_from_source(self):
+        """소스 실행에서는 건드리지 않는다 — 검사는 낡은 생성 모듈을 잡아 준다."""
+        self.assertNotIn("__compiled__", camera.__dict__)
+        had_frozen = hasattr(sys, "frozen")
+        camera._relax_comtypes_typelib_check()
+        self.assertEqual(hasattr(sys, "frozen"), had_frozen)
 
 if __name__ == "__main__": unittest.main()
