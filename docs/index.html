@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webcam Mirror — 바탕화면 위의 웹캠 오버레이</title>
+<meta name="description" content="배경 제거, 인물 추적, 피부 보정을 갖춘 Windows 웹캠 오버레이. 영상이 이 PC를 떠나지 않습니다.">
+<meta property="og:title" content="Webcam Mirror">
+<meta property="og:description" content="배경 제거 · 인물 추적 · 피부 보정 — 전부 이 PC 안에서, 인터넷 없이.">
+<meta property="og:image" content="assets/hero.png">
+<meta property="og:type" content="website">
+<link rel="icon" href="assets/logo.png">
+<style>
+  :root {
+    --bg: #14151a;
+    --bg-soft: #1b1d24;
+    --card: #1e2028;
+    --line: #2c2f3a;
+    --fg: #ecedf0;
+    --fg-dim: #a5a9b6;
+    --accent: #5b8cff;
+    --accent-soft: rgba(91, 140, 255, .14);
+    --warn-bg: rgba(255, 186, 76, .10);
+    --warn-line: rgba(255, 186, 76, .35);
+    --radius: 14px;
+    --max: 940px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.75 -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- hero ---------- */
+  header {
+    text-align: center;
+    padding: 80px 24px 64px;
+    background:
+      radial-gradient(900px 420px at 50% -120px, rgba(91,140,255,.18), transparent 70%),
+      linear-gradient(180deg, #191b22, var(--bg));
+    border-bottom: 1px solid var(--line);
+  }
+  header img.logo { width: 104px; height: 104px; border-radius: 24px; }
+  h1 {
+    margin: 22px 0 8px;
+    font-size: clamp(2.1rem, 6vw, 3.1rem);
+    letter-spacing: -.02em;
+    font-weight: 700;
+  }
+  .tagline { margin: 0 0 6px; font-size: clamp(1.02rem, 2.6vw, 1.22rem); color: var(--fg); }
+  .sub { margin: 0; color: var(--fg-dim); font-size: .96rem; }
+
+  .cta { margin: 34px 0 12px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 13px 26px; border-radius: 11px;
+    font-weight: 600; text-decoration: none; font-size: 1.02rem;
+    border: 1px solid transparent; transition: transform .12s ease, background .15s ease;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn-primary { background: var(--accent); color: #0c1020; }
+  .btn-primary:hover { background: #7aa1ff; }
+  .btn-ghost { border-color: var(--line); color: var(--fg); background: var(--bg-soft); }
+  .btn-ghost:hover { border-color: #3c4152; }
+  .meta { color: var(--fg-dim); font-size: .86rem; margin-top: 4px; }
+
+  /* ---------- sections ---------- */
+  section { padding: 64px 0; border-bottom: 1px solid var(--line); }
+  section:last-of-type { border-bottom: 0; }
+  h2 {
+    font-size: clamp(1.4rem, 3.6vw, 1.85rem); letter-spacing: -.015em;
+    margin: 0 0 10px; font-weight: 700;
+  }
+  .lede { color: var(--fg-dim); margin: 0 0 30px; max-width: 62ch; }
+  p { margin: 0 0 16px; }
+
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 22px 22px 20px;
+  }
+  .card h3 { margin: 0 0 7px; font-size: 1.04rem; font-weight: 650; }
+  .card p { margin: 0; color: var(--fg-dim); font-size: .93rem; line-height: 1.7; }
+  .card .ico { font-size: 1.45rem; line-height: 1; display: block; margin-bottom: 11px; }
+
+  .privacy {
+    background: linear-gradient(180deg, var(--accent-soft), transparent);
+    border: 1px solid rgba(91,140,255,.28); border-radius: var(--radius);
+    padding: 28px 26px;
+  }
+  .privacy h2 { margin-bottom: 12px; }
+  .privacy p:last-child { margin-bottom: 0; }
+
+  .note {
+    background: var(--warn-bg); border: 1px solid var(--warn-line);
+    border-radius: var(--radius); padding: 22px 24px; margin: 22px 0 0;
+  }
+  .note h3 { margin: 0 0 10px; font-size: 1.02rem; }
+  .note p { color: var(--fg-dim); font-size: .94rem; }
+  .note p:last-child { margin-bottom: 0; }
+  .quote {
+    border-left: 3px solid var(--warn-line); padding: 2px 0 2px 14px;
+    margin: 0 0 14px; color: var(--fg); font-size: .92rem;
+  }
+
+  .tbl-scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .93rem; min-width: 440px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--fg-dim); font-weight: 600; width: 34%; white-space: nowrap; }
+
+  kbd {
+    background: var(--bg-soft); border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 6px; padding: 2px 7px; font-size: .84rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: nowrap;
+  }
+  pre {
+    background: var(--bg-soft); border: 1px solid var(--line); border-radius: 10px;
+    padding: 15px 17px; overflow-x: auto; font-size: .88rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .shot { width: 100%; border-radius: var(--radius); border: 1px solid var(--line); display: block; }
+
+  footer { padding: 46px 0 64px; color: var(--fg-dim); font-size: .88rem; }
+  footer p { margin: 0 0 8px; }
+
+  @media (max-width: 560px) {
+    header { padding: 58px 20px 46px; }
+    section { padding: 48px 0; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <img class="logo" src="assets/logo.png" alt="Webcam Mirror 로고">
+  <h1>Webcam Mirror</h1>
+  <p class="tagline">바탕화면 위에 웹캠을 띄우는 Windows 오버레이</p>
+  <p class="sub">배경 제거 · 인물 추적 · 피부 보정 — 전부 이 PC 안에서, 인터넷 없이.</p>
+
+  <div class="cta">
+    <a class="btn btn-primary" href="https://github.com/yl-famaily/webcam_mirror/releases/latest">⬇ 최신 버전 내려받기</a>
+    <a class="btn btn-ghost" href="https://github.com/yl-famaily/webcam_mirror">소스 보기</a>
+  </div>
+  <p class="meta">Windows 10 (1809) 이상 · 64비트 · 설치 불필요</p>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>이런 걸 할 수 있다</h2>
+    <p class="lede">
+      방송이나 화상회의, 강의 녹화를 할 때 <strong>내 얼굴만 화면 위에 따로 띄우고 싶을 때</strong> 쓰는 앱입니다.
+      창은 테두리가 없고 원하는 모양으로 잘리며, 배경을 지우면 바탕화면 위에 사람만 떠 있는 것처럼 보입니다.
+    </p>
+
+    <div class="grid">
+      <div class="card">
+        <span class="ico">🎭</span>
+        <h3>배경 제거</h3>
+        <p>투명 · 흐리게 · 단색 · 이미지. 사람만 남깁니다. 머리카락 경계는 가이디드 필터로 실제 윤곽에 맞춥니다.</p>
+      </div>
+      <div class="card">
+        <span class="ico">🎯</span>
+        <h3>인물 추적</h3>
+        <p>움직여도 화면 가운데를 유지하는 오토 프레이밍. 따라오는 속도와 잡는 크기를 1~10으로 조절합니다.</p>
+      </div>
+      <div class="card">
+        <span class="ico">✨</span>
+        <h3>피부 보정</h3>
+        <p>매끄럽게 · 피부톤(차갑게~따뜻하게) · 밝기. 슬라이더를 움직이는 내내 실시간으로 반영됩니다.</p>
+      </div>
+      <div class="card">
+        <span class="ico">⬭</span>
+        <h3>어떤 모양이든</h3>
+        <p>원형·사각형, 8가지 비율(1:1, 16:9, 9:16 숏폼 등), 투명도, 테두리 두께와 색.</p>
+      </div>
+      <div class="card">
+        <span class="ico">🪶</span>
+        <h3>방해하지 않는다</h3>
+        <p>항상 맨 위에 있으면서 포커스를 뺏지 않습니다. 클릭 통과를 켜면 창 너머를 그대로 조작할 수 있습니다.</p>
+      </div>
+      <div class="card">
+        <span class="ico">⌨</span>
+        <h3>전역 단축키</h3>
+        <p>다른 앱을 쓰는 중에도 숨기고, 뒤집고, 설정을 열 수 있습니다.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="privacy">
+      <h2>인터넷을 쓰지 않습니다</h2>
+      <p><strong>영상이 이 PC를 떠나지 않습니다.</strong> 배경 제거에 쓰는 인물 분리 모델은 기기 안에서 돌아갑니다. 계정도, 로그인도, 서버 통신도 없습니다.</p>
+      <p>이건 마케팅 문구가 아니라 코드로 확인할 수 있는 사실입니다 — 저장소 전체에 네트워크 호출이 한 줄도 없습니다. 네트워크 모듈을 쓰는 곳은 중복 실행을 막는 로컬 named pipe 하나뿐이고, 그건 같은 PC 안의 프로세스끼리만 씁니다. 소스가 공개되어 있으니 직접 확인하실 수 있습니다.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>내려받기</h2>
+    <p class="lede">
+      릴리스 페이지에서 <code>WebcamMirror_x.y.z.exe</code> 를 받으세요.
+      설치 과정이 없고, 받은 파일을 그대로 실행하면 됩니다.
+    </p>
+
+    <div class="cta" style="justify-content:flex-start;margin-top:0">
+      <a class="btn btn-primary" href="https://github.com/yl-famaily/webcam_mirror/releases/latest">릴리스 페이지로</a>
+    </div>
+
+    <div class="note">
+      <h3>⚠ 처음 실행할 때 경고가 나옵니다</h3>
+      <p>이 실행 파일은 <strong>코드 서명이 되어 있지 않습니다.</strong> 그래서 Windows SmartScreen 이 이런 창을 띄웁니다.</p>
+      <p class="quote"><strong>Windows의 PC 보호</strong><br>Windows Defender SmartScreen에서 인식할 수 없는 앱의 시작을 차단했습니다.</p>
+      <p>바이러스라는 뜻이 아니라 <em>“서명된 적 없는 새 프로그램”</em>이라는 뜻입니다. 실행하려면 <strong>추가 정보</strong> → <strong>실행</strong> 을 누르면 됩니다.</p>
+      <p>서명 인증서는 매년 비용이 드는 물건이라 아직 붙이지 않았습니다. 이 경고 없이 쓰고 싶다면 Microsoft Store 판(준비 중)을 기다리시는 편이 낫습니다 — 스토어를 거치면 서명과 검증이 함께 따라옵니다.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>시스템 요구사항</h2>
+    <div class="tbl-scroll">
+      <table>
+        <tr><th>운영체제</th><td>Windows 10 버전 1809 (빌드 17763) 이상</td></tr>
+        <tr><th>아키텍처</th><td>x64</td></tr>
+        <tr><th>카메라</th><td>USB 웹캠, 내장 카메라, 가상 카메라(OBS · Insta360 등)</td></tr>
+        <tr><th>디스크</th><td>약 200 MB (실행 시 임시 압축 해제)</td></tr>
+        <tr><th>설치</th><td>불필요 — 단일 실행 파일</td></tr>
+        <tr><th>Python</th><td>필요 없음. 실행 파일 안에 전부 들어 있습니다</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>전역 단축키</h2>
+    <p class="lede">다른 앱을 쓰는 중에도 동작합니다.</p>
+    <div class="tbl-scroll">
+      <table>
+        <tr><th><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>M</kbd></th><td>창 숨기기 / 다시 보이기</td></tr>
+        <tr><th><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>F</kbd></th><td>좌우 반전</td></tr>
+        <tr><th><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>T</kbd></th><td>항상 맨 위 켜기 / 끄기</td></tr>
+        <tr><th><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>C</kbd></th><td>클릭 통과 켜기 / 끄기</td></tr>
+        <tr><th><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>S</kbd></th><td>설정 패널 열기 / 닫기</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>알아 두면 좋은 것</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>앱 화면은 한국어입니다</h3>
+        <p>메뉴와 설정이 모두 한국어로만 되어 있습니다.</p>
+      </div>
+      <div class="card">
+        <h3>첫 실행은 조금 느립니다</h3>
+        <p>단일 실행 파일이라 처음 켤 때 내용을 임시 폴더에 풉니다. 두 번째부터는 빨라집니다.</p>
+      </div>
+      <div class="card">
+        <h3>가상 카메라도 목록에 나옵니다</h3>
+        <p>OBS·PRISM·Insta360 같은 프로그램이 만든 가상 카메라가 함께 보입니다. 원본 기기가 송출 중이 아니면 검은 화면이 나오니, 우클릭 → 카메라에서 실제 웹캠을 고르세요.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>소스에서 실행하기</h2>
+    <p class="lede">Python 3.12 이상 (3.14 에서 개발·검증). 소스는 공개되어 있습니다.</p>
+<pre>git clone https://github.com/yl-famaily/webcam_mirror.git
+cd webcam_mirror
+python -m pip install -r requirements.txt
+python main.py</pre>
+    <p>만드는 과정에서 실제로 측정하고 결정한 내용 — 왜 이 백엔드를 쓰는지, 잔상이 왜 생겼고 어떻게 없앴는지 — 은 <a href="https://github.com/yl-famaily/webcam_mirror#readme">README</a> 에 자세히 적어 두었습니다.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>Copyright © 2026 develckm. All rights reserved.</p>
+    <p><a href="https://github.com/yl-famaily/webcam_mirror">GitHub 저장소</a> · <a href="https://github.com/yl-famaily/webcam_mirror/releases">모든 릴리스</a> · <a href="https://github.com/yl-famaily/webcam_mirror/issues">문제 신고</a></p>
+  </div>
+</footer>
+
+</body>
+</html>
