@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
 import theme
 import winapi
-from camera import CameraThread
+from camera import CameraThread, default_camera_modes, list_camera_modes
 from effects import FrameProcessor
 from menu import ask_color, ask_image
 from overlay import OverlayWindow
@@ -24,9 +24,12 @@ from settings import (
 )
 from tray import TrayIcon, make_icon
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.11"
+# 뮤텍스/파이프 이름. 바꾸면 구버전이 돌고 있어도 못 알아보니 고정한다.
+SINGLE_INSTANCE_KEY = "WebcamMirror-SingleInstance-v1"
 SAVE_DEBOUNCE_MS = 600
 CAMERA_CACHE_SEC = 30.0
+CAMERA_RETRY_DELAYS_MS = (800, 1600, 3000)
 
 
 class AppController:
@@ -47,6 +50,12 @@ class AppController:
         self._panel = None  # 설정 패널 — 처음 열 때 만든다 (시작 시간 보호)
         self._panel_was_open = False  # 창을 숨길 때 패널이 열려 있었는지
         self._camera_cache: tuple[float, list[tuple[int, str]]] | None = None
+        self._camera_modes: list[dict] = []
+        self._camera_modes_are_default = False
+        self._camera_retry_count = 0
+        self._camera_retry_timer = QTimer(app)
+        self._camera_retry_timer.setSingleShot(True)
+        self._camera_retry_timer.timeout.connect(self._retry_camera)
 
         # 드래그/리사이즈 중 매번 디스크에 쓰지 않도록 저장을 지연시킨다.
         self._save_timer = QTimer(app)
@@ -94,6 +103,7 @@ class AppController:
         )
 
     def _on_about_to_quit(self) -> None:
+        self._camera_retry_timer.stop()
         self.stop_camera()
         self.hotkeys.unregister_all()
         self._save_timer.stop()
@@ -218,28 +228,193 @@ class AppController:
         camera, self.camera = self.camera, None
         try:
             camera.frame_ready.disconnect(self.window.on_frame)
-            camera.error.disconnect(self.window.on_error)
+            camera.frame_ready.disconnect(self._on_camera_frame)
+            camera.error.disconnect(self._on_camera_error)
         except (RuntimeError, TypeError):
             pass
         camera.stop()
 
     def restart_camera(self) -> None:
         self._camera_cache = None  # 다시 연결할 땐 목록도 새로 본다
-        self.switch_camera(self.settings.camera_index, self.settings.camera_name)
+        self._camera_retry_count = 0
+        self._camera_retry_timer.stop()
+        resolved = self._resolved_camera()
+        if resolved is None:
+            self.stop_camera()
+            self.window.on_error(
+                "저장된 카메라를 찾을 수 없습니다.\n우클릭 → 카메라에서 연결된 장치를 선택해 주세요."
+            )
+            return
+        index, name = resolved
+        self._start_camera(index, name, save_selection=True)
 
     def switch_camera(self, index: int, name: str = "") -> None:
+        self._camera_retry_count = 0
+        self._camera_retry_timer.stop()
+        self._start_camera(index, name, save_selection=True)
+
+    def _resolved_camera(self) -> tuple[int, str] | None:
+        """저장된 이름을 우선해 장치 순서가 바뀌어도 같은 카메라를 찾는다."""
+        devices = self.cameras(force=True)
+        if not devices:
+            return self.settings.camera_index, self.settings.camera_name
+        if self.settings.camera_name:
+            for index, name in devices:
+                if name == self.settings.camera_name:
+                    return index, name
+            # 실제 장치 이름을 저장한 경우에는 같은 인덱스의 다른 장치를 열지
+            # 않는다. USB 재연결로 순서가 바뀌면 엉뚱한 카메라가 선택된다.
+            if ("�" not in self.settings.camera_name
+                    and not self.settings.camera_name.startswith("카메라 ")):
+                return None
+        for index, name in devices:
+            if index == self.settings.camera_index:
+                return index, name
+        return devices[0]
+
+    def _start_camera(self, index: int, name: str, save_selection: bool) -> None:
         self.stop_camera()
-        self.settings.camera_index = int(index)
-        self.settings.camera_name = name
-        self._notify()
+        modes = list_camera_modes(index)
+        # 장치가 모드를 안 알려 주는 경우(가상 카메라, COM 열거 실패, 드라이버가
+        # 형식을 숨기는 경우)가 있다. 그때 목록을 비워 두면 사용자는 해상도를
+        # 아예 못 고르고, 저장된 값이 그대로 굳는다. 표준 조합을 기본값으로
+        # 대신 내보내 고를 수 있게 한다.
+        self._camera_modes_are_default = not modes
+        if not modes:
+            modes = default_camera_modes()
+        self._camera_modes = modes
+        selected = self._select_camera_mode(modes)
+        if selected:
+            self.settings.camera_width = selected["width"]
+            self.settings.camera_height = selected["height"]
+            self.settings.camera_fps = selected["fps"]
+            self.settings.camera_fourcc = selected["fourcc"]
+        if save_selection:
+            self.settings.camera_index = int(index)
+            self.settings.camera_name = name
+            self._notify()
 
         self.processor.reset()
         self.window.set_status("카메라 여는 중...")
-        camera = CameraThread(index, self.processor)
+        camera = CameraThread(index, self.processor,
+                              quality=self.settings.camera_quality,
+                              fps=self.settings.camera_fps,
+                              width=self.settings.camera_width,
+                              height=self.settings.camera_height,
+                              fourcc=self.settings.camera_fourcc,
+                              # 목록이 기본값 대체여도 해상도/FPS 는 요청한다.
+                              # 그 값들은 못 맞추면 가장 가까운 모드로 열릴 뿐이고,
+                              # 위험한 fourcc 는 기본 목록에서 비워 두었다.
+                              auto_mode=False)
         camera.frame_ready.connect(self.window.on_frame)
-        camera.error.connect(self.window.on_error)
+        camera.frame_ready.connect(self._on_camera_frame)
+        camera.error.connect(self._on_camera_error)
         self.camera = camera
         camera.start()
+
+    def _on_camera_frame(self, _image) -> None:
+        self._camera_retry_count = 0
+        self._camera_retry_timer.stop()
+
+    def _on_camera_error(self, message: str) -> None:
+        if self._camera_retry_count >= len(CAMERA_RETRY_DELAYS_MS):
+            self.window.on_error(
+                message + "\n우클릭 → 카메라에서 장치를 다시 선택해 주세요."
+            )
+            return
+        delay = CAMERA_RETRY_DELAYS_MS[self._camera_retry_count]
+        self._camera_retry_count += 1
+        self.window.set_status(
+            "%s\n%.1f초 후 자동으로 다시 연결합니다. (%d/%d)" %
+            (message, delay / 1000.0, self._camera_retry_count,
+             len(CAMERA_RETRY_DELAYS_MS))
+        )
+        self._camera_retry_timer.start(delay)
+
+    def _retry_camera(self) -> None:
+        resolved = self._resolved_camera()
+        if resolved is None:
+            self._on_camera_error("저장된 카메라가 아직 연결되지 않았습니다.")
+            return
+        self._start_camera(resolved[0], resolved[1], save_selection=False)
+
+    def _select_camera_mode(self, modes: list[dict]) -> dict | None:
+        if not modes:
+            return None
+        wanted = (self.settings.camera_width, self.settings.camera_height,
+                  self.settings.camera_fps, self.settings.camera_fourcc)
+        for mode in modes:
+            if (mode["width"], mode["height"], mode["fps"], mode["fourcc"]) == wanted:
+                return mode
+        # 픽셀 형식이 바뀌었어도 같은 크기/FPS면 그 장치가 선호하는 형식을 쓴다.
+        for mode in modes:
+            if (mode["width"], mode["height"], mode["fps"]) == wanted[:3]:
+                return mode
+        return min(modes, key=lambda mode: (
+            abs(mode["width"] * mode["height"]
+                - self.settings.camera_width * self.settings.camera_height),
+            abs(mode["fps"] - self.settings.camera_fps)))
+
+    def camera_modes(self) -> list[dict]:
+        return list(self._camera_modes)
+
+    def camera_modes_are_default(self) -> bool:
+        """목록이 장치에서 읽은 것이 아니라 기본값 대체인지."""
+        return self._camera_modes_are_default
+
+    def set_camera_mode(self, mode_key) -> None:
+        if isinstance(mode_key, str):
+            try:
+                size, fps, fourcc = mode_key.split("|")
+                width, height = size.split("x")
+                mode_key = (int(width), int(height), int(fps), fourcc)
+            except (TypeError, ValueError):
+                return
+        try:
+            width, height, fps, fourcc = mode_key
+        except (TypeError, ValueError):
+            return
+        match = next((mode for mode in self._camera_modes
+                      if (mode["width"], mode["height"], mode["fps"], mode["fourcc"])
+                      == (int(width), int(height), int(fps), str(fourcc))), None)
+        if match is None:
+            return
+        current = (self.settings.camera_width, self.settings.camera_height,
+                   self.settings.camera_fps, self.settings.camera_fourcc)
+        if current == (width, height, fps, fourcc):
+            return
+        self.settings.camera_width = int(width)
+        self.settings.camera_height = int(height)
+        self.settings.camera_fps = int(fps)
+        self.settings.camera_fourcc = str(fourcc)
+        self.restart_camera()
+
+    def camera_quality_status(self) -> str:
+        requested = (self.settings.camera_width, self.settings.camera_height)
+        camera = self.camera
+        if camera is None or "frame_width" not in camera.actual_mode:
+            return "실제 입력 확인 중…"
+        mode = camera.actual_mode
+        actual = (mode["frame_width"], mode["frame_height"])
+        measured_fps = mode.get("measured_fps")
+        fps_text = " · %.1f FPS" % measured_fps if measured_fps else " · FPS 측정 중…"
+        text = "실제 입력: %d×%d%s" % (actual[0], actual[1], fps_text)
+        auto_mode = getattr(camera, "auto_mode", False)
+        if auto_mode:
+            text += "\n자동 · 장치 기본 출력 사용"
+        if not auto_mode and actual != requested:
+            text += "\n선택한 해상도가 적용되지 않았습니다."
+        if not auto_mode and measured_fps and abs(measured_fps - self.settings.camera_fps) > max(1, self.settings.camera_fps * .15):
+            text += "\n카메라가 선택한 %d FPS보다 낮게 전송하고 있습니다." % self.settings.camera_fps
+        if camera.output_size:
+            text += "\n효과·추적 후: %d×%d" % camera.output_size
+        display_fps = mode.get("display_fps")
+        if display_fps:
+            text += " · 화면 %.1f FPS" % display_fps
+            if (measured_fps and measured_fps >= self.settings.camera_fps * .85
+                    and display_fps < self.settings.camera_fps * .85):
+                text += "\n효과 처리 속도 때문에 화면 FPS가 낮아졌습니다."
+        return text
 
     # -------------------------------------------------------------- 모양 --
 
@@ -425,6 +600,16 @@ class AppController:
                 4000,
             )
 
+    def surface(self) -> None:
+        """두 번째 인스턴스가 뜨려 했을 때 — 대신 이미 있는 창을 보여 준다.
+
+        숨겨 둔 상태에서 아이콘을 다시 누른 사용자에게는 아무 반응이 없는 것이
+        고장으로 보인다. activateWindow() 까지는 하지 않는다 — 이 앱은 포커스를
+        뺏지 않는다는 원칙으로 만들어져 있다(패널의 WA_ShowWithoutActivating).
+        """
+        self.set_hidden(False)
+        self.window.raise_()
+
     def toggle_visible(self) -> None:
         self.set_hidden(self.window.isVisible())
 
@@ -443,11 +628,95 @@ class AppController:
                 self.open_panel()
 
 
+def _install_crash_log() -> None:
+    """갑자기 꺼질 때 원인을 남긴다 — %APPDATA%\\WebcamMirror\\crash.log
+
+    콘솔 없는 exe에서는 stderr가 없어서, 슬롯에서 난 파이썬 예외(PySide가
+    곧바로 프로세스를 끝낸다)나 네이티브 크래시가 아무 흔적 없이 사라진다.
+    faulthandler는 네이티브 크래시 때 모든 스레드의 파이썬 스택을 쓴다.
+    """
+    import datetime
+    import faulthandler
+    import os
+    import threading
+    import traceback
+
+    from settings import APP_DIR
+
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        path = os.path.join(APP_DIR, "crash.log")
+        # 무한히 커지지 않게 크면 새로 시작한다.
+        mode = "w" if os.path.exists(path) and os.path.getsize(path) > 512_000 else "a"
+        log = open(path, mode, encoding="utf-8", buffering=1)
+    except OSError:
+        return
+    log.write("\n=== start %s v%s ===\n" % (datetime.datetime.now().isoformat(" ", "seconds"),
+                                          APP_VERSION))
+    faulthandler.enable(log, all_threads=True)
+    if sys.stderr is None:
+        sys.stderr = log  # PySide가 슬롯 예외 traceback을 여기에 쓴다
+
+    def write_exception(kind, exc_type, exc, tb):
+        log.write("[%s] %s\n%s" % (datetime.datetime.now().isoformat(" ", "seconds"), kind,
+                                   "".join(traceback.format_exception(exc_type, exc, tb))))
+
+    previous = sys.excepthook
+
+    def excepthook(exc_type, exc, tb):
+        write_exception("unhandled", exc_type, exc, tb)
+        previous(exc_type, exc, tb)
+
+    sys.excepthook = excepthook
+    threading.excepthook = lambda args: write_exception(
+        "thread %s" % getattr(args.thread, "name", "?"),
+        args.exc_type, args.exc_value, args.exc_traceback)
+    # 파일 객체가 GC되면 faulthandler가 닫힌 fd에 쓰게 되므로 붙잡아 둔다.
+    sys.modules[__name__]._crash_log = log
+
+
 def main() -> int:
+    # Packaged diagnostic path: exercises dynamic COM imports without opening
+    # a video stream, the overlay, or the user's saved settings.
+    if len(sys.argv) == 3 and sys.argv[1] == "--camera-mode-report":
+        import json
+        import traceback
+        from pathlib import Path
+        report = {"version": APP_VERSION}
+        try:
+            from camera import _relax_comtypes_typelib_check
+            _relax_comtypes_typelib_check()
+            from pygrabber.dshow_graph import FilterGraph
+            graph = FilterGraph()
+            report["devices"] = graph.get_input_devices()
+            report["modes"] = {}
+            for index, name in enumerate(report["devices"]):
+                try:
+                    probe = FilterGraph()
+                    probe.add_video_input_device(index)
+                    report["modes"][name] = probe.get_input_device().get_formats()
+                    probe.remove_filters()
+                except Exception:
+                    report["modes"][name] = {"error": traceback.format_exc()}
+        except Exception:
+            report["error"] = traceback.format_exc()
+        Path(sys.argv[2]).write_text(json.dumps(report, ensure_ascii=False, indent=2),
+                                    encoding="utf-8")
+        return 1 if "error" in report else 0
+
+    _install_crash_log()
     app = QApplication(sys.argv)
     app.setApplicationName("Webcam Mirror")
     app.setApplicationDisplayName("Webcam Mirror")
     app.setApplicationVersion(APP_VERSION)
+
+    # 중복 실행 차단은 최대한 앞에서 — 테마·아이콘·카메라를 준비하기 전에
+    # 물러나야 두 번째 실행이 순식간에 끝나고 웹캠도 건드리지 않는다.
+    lock = winapi.SingleInstance(SINGLE_INSTANCE_KEY)
+    if not lock.acquired:
+        lock.notify_existing()
+        return 0
+
     # 위젯을 만들기 전에 적용해야 한다 — Fusion 으로 바꾸는 게 포함돼 있고,
     # Windows 기본 스타일은 QMenu 의 QSS 상당수를 무시한다.
     theme.apply_theme(app)
@@ -455,6 +724,7 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)  # 창을 숨겨도 앱은 살아있어야 한다
 
     controller = AppController(app)
+    lock.activated.connect(controller.surface)
 
     if controller.tray is None:
         QMessageBox.information(
@@ -464,7 +734,10 @@ def main() -> int:
         )
 
     controller.start()
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

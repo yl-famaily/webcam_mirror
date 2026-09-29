@@ -1,8 +1,7 @@
 """프레임 후처리 — 피부톤 보정과 배경 제거.
 
-캡처 스레드 안에서 돌아가므로 비용에 민감하다. 1280x720 원본을 그대로
-필터링하면 30fps 를 못 맞추므로(bilateral 기준 18ms), 작업 해상도로
-줄인 뒤 처리한다. 창은 보통 320x240 근처라 640 폭이면 충분히 선명하다.
+효과를 켜도 1280x720 영상의 디테일을 유지한다. 인물 분리 모델만 별도의
+작은 입력으로 추론하며, 결과 마스크는 작업 해상도로 확대해 합성한다.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from settings import (
     track_zoom,
 )
 
-WORK_WIDTH = 640  # 효과를 적용할 작업 해상도(가로)
+WORK_WIDTH = 1280  # HD 입력을 보존한다. 작은 원본을 억지로 확대하지 않는다.
 
 # YCrCb 색공간의 일반적인 피부색 범위. 조명 변화에 비교적 둔감하다.
 SKIN_LOW = np.array([0, 133, 77], dtype=np.uint8)
@@ -64,11 +63,24 @@ BLOB_KEEP_RATIO = 0.2  # 가장 큰 덩어리의 이 비율 미만인 조각은 
 # 실제 처리 시간을 재서 스스로 조절한다 — 여유가 있으면 매 프레임 추론해
 # 움직임을 정확히 따라가고, 빠듯해지면 격프레임으로 내려가 직전 마스크를
 # 재사용한다. 두 문턱 사이를 벌려 경계에서 왔다갔다하지 않게 한다.
-SEG_SLOW_MS = 30.0  # 프레임 전체가 이 위로 올라가면 격프레임으로 내려간다
-SEG_FAST_MS = 22.0  # 이 아래로 내려오면 다시 매 프레임
-SEG_WORTH_SKIPPING_MS = 5.0  # 세그멘테이션이 이보다 싸면 건너뛰어도 소용없다
-SEG_EVERY_MAX = 3  # 여기까지 늘릴 수 있다 (느린 PC 대비)
+SEG_SLOW_MS = 30.0  # 30fps 이하에서 쓰는 기존 상한
+# 예산을 못 지킬 때 무엇을 포기하는가. 예전에는 추론 주기를 늘려 낡은 마스크를
+# 재사용했다 — 그러면 새 영상이 **이전 실루엣**으로 잘려서, 움직일 때 배경이
+# 인물처럼 남고 몸은 잘려 나간다. 그게 사용자가 본 잔상이다. 측정해 보면 그렇게
+# 아끼려던 추론은 3~5ms 뿐이고 진짜 비용은 풀해상도 가이디드 필터(1920x1440
+# 에서 39ms)였다. 그래서 이제는 주기를 늘리는 대신 처리 해상도를 줄인다.
+# 해상도를 줄이면 조금 부드러워질 뿐이지만, 마스크를 낡히면 형체가 틀어진다.
+SEG_EVERY_MAX = 1  # 낡은 마스크는 절대 화면에 내보내지 않는다
 SEG_SETTLE_FRAMES = 20  # 주기를 바꾼 뒤 EMA 가 따라올 때까지 쉬는 프레임
+
+# 처리 해상도는 캡처 해상도가 아니라 **화면에 보이는 크기**가 정한다. 494x494
+# 창에 1920x1440 을 그대로 통과시키면 보여 줄 수 없는 픽셀에 예산을 다 쓴다.
+WORK_OVERSAMPLE = 1.5  # 창 픽셀 대비 여유배 (축소 품질과 리사이즈 여유)
+WORK_TRACK_ALLOWANCE = 2.5  # 추적은 원본 일부를 잘라 확대하므로 더 필요하다
+WORK_WIDTH_MIN = 480  # 화질 바닥 — 여기서 더 줄이느니 프레임을 흘린다
+WORK_WIDTH_MAX = 1600  # 오버레이 창 용도의 안전 상한 (물리 픽셀 기준)
+WORK_SCALE_MIN = 0.5  # 느린 PC 에서 여기까지 줄인다
+WORK_SCALE_STEP = 0.1
 
 # 인물 추적(오토 프레이밍). 이징 속도와 데드존은 settings 의 속도 1~10 에서
 # 파생된다 — 여기 하드코딩하면 슬라이더가 의미를 잃는다.
@@ -111,6 +123,7 @@ class FrameProcessor:
         self._cost_ms = 0.0  # 프레임 전체 처리 시간 EMA
         self._seg_cost_ms = 0.0  # 추론 1회 비용 EMA (건너뛴 프레임은 안 섞는다)
         self._seg_every = 1
+        self._work_scale = 1.0  # 예산을 못 지킬 때 낮추는 처리 해상도 배율
         self._settle = 0  # 주기를 바꾼 뒤 EMA 가 따라올 때까지 기다리는 프레임 수
         self._warmed = False  # 첫 프레임(모델 로딩 포함)을 버렸는지
         self._track_cur = None  # 지금 화면에 적용 중인 크롭 (중심x, 중심y, 폭, 높이)
@@ -134,7 +147,7 @@ class FrameProcessor:
         if not self.enabled():
             return bgr
         started = time.perf_counter()
-        work = self._downscale(bgr)
+        work = self._downscale(bgr, self._work_width(bgr.shape[1], bgr.shape[0]))
         # 모델은 보정되지 않은 원본을 봐야 한다. 보정본은 bilateral 블러에
         # 밝기 +-27, R/B 시프트 +-16 이 걸린 이미지라 학습 분포에서 벗어난다.
         clean = work
@@ -156,6 +169,42 @@ class FrameProcessor:
 
         self._tune_cadence((time.perf_counter() - started) * 1000.0)
         return work
+
+    def _work_width(self, frame_w: int, frame_h: int) -> int:
+        """화면에 실제로 보여 줄 크기에 맞춘 처리 해상도.
+
+        예전에는 캡처 너비를 그대로 목표로 삼았는데, 그건 사실상 축소를 하지
+        않는 것과 같았다. 그래서 494x494 창을 쓰면서도 1920x1440 전체에
+        세그멘테이션과 가이디드 필터를 걸었다. 가이디드 필터는 계수를 풀해상도
+        가이드에 적용하므로 비용이 픽셀 수에 정비례한다 — 1920x1440 에서 39ms,
+        프레임 전체로는 85ms 다. 33ms 예산을 두 배 넘기니 _tune_cadence 가
+        물러설 곳을 찾았고, 그 결과가 낡은 마스크 재사용, 곧 잔상이었다.
+
+        창은 프레임을 cover 로 채운다(짧은 쪽이 창을 덮는다). 그 배율에
+        오버샘플 여유만 곱하면 눈에 보이는 화질을 잃지 않는다.
+        """
+        # 물리 픽셀(view_size)이 있으면 그걸 쓴다. 논리 픽셀만 보면 고배율
+        # 화면에서 실제로 칠해지는 것보다 낮은 해상도로 계산해 흐려진다.
+        view = getattr(self.s, "view_size", None)
+        if view:
+            win_w, win_h = int(view[0]), int(view[1])
+        else:
+            win_w = int(getattr(self.s, "w", 0) or 0)
+            win_h = int(getattr(self.s, "h", 0) or 0)
+        if frame_w <= 0 or frame_h <= 0:
+            return frame_w
+        if win_w <= 1 or win_h <= 1:
+            return frame_w  # 창 크기를 모르면 손대지 않는다
+        cover = max(win_w / frame_w, win_h / frame_h)
+        need = frame_w * cover * WORK_OVERSAMPLE
+        if self.s.track_enabled:
+            # 추적은 원본 일부만 잘라 쓰므로 그만큼 원본이 더 필요하다.
+            need *= WORK_TRACK_ALLOWANCE
+        # 배율은 **상한으로 자른 뒤에** 곱한다. 순서를 바꾸면 need 가 상한보다
+        # 클 때(고배율 화면) 위쪽 몇 단계가 같은 값으로 잘려 아무 효과가 없고,
+        # 그동안 예산을 넘긴 채로 몇 초를 버티다 한 번에 뚝 떨어진다.
+        target = min(frame_w, WORK_WIDTH_MAX, int(round(need)))
+        return int(max(WORK_WIDTH_MIN, min(frame_w, round(target * self._work_scale))))
 
     def _tune_cadence(self, total_ms: float) -> None:
         """추론 주기를 스스로 조절한다.
@@ -183,21 +232,18 @@ class FrameProcessor:
             self._settle -= 1
             return
 
-        every, seg = self._seg_every, self._seg_cost_ms
-        if (
-            self._cost_ms > SEG_SLOW_MS
-            and seg > SEG_WORTH_SKIPPING_MS
-            and every < SEG_EVERY_MAX
-        ):
-            self._seg_every = every + 1
+        # 60fps에서는 16.7ms 안에 한 프레임을 끝내야 한다. 30fps용 고정
+        # 30ms 문턱을 그대로 쓰면 처리량이 30~40fps에 머물러도 적응하지 않는다.
+        fps = max(1, int(getattr(self.s, "camera_fps", 30)))
+        slow_ms = min(SEG_SLOW_MS, 1000.0 / fps * .95)
+        if self._cost_ms > slow_ms and self._work_scale > WORK_SCALE_MIN:
+            self._work_scale = max(WORK_SCALE_MIN, self._work_scale - WORK_SCALE_STEP)
             self._settle = SEG_SETTLE_FRAMES
-        elif every > 1:
-            # 한 단계 낮추면 늘어날 비용을 미리 계산해서 판단한다. 고정 임계값만
-            # 보면 두 문턱 사이(22~30ms)에 들어온 순간 영영 못 돌아온다.
-            predicted = self._cost_ms + seg * (1.0 / (every - 1) - 1.0 / every)
-            if predicted < SEG_SLOW_MS:
-                self._seg_every = every - 1
-                self._settle = SEG_SETTLE_FRAMES
+        elif self._cost_ms < slow_ms * 0.6 and self._work_scale < 1.0:
+            # 되돌릴 때는 문턱을 낮게 잡는다. 같은 값으로 오르내리면 예산
+            # 언저리에서 해상도가 계속 흔들려 화면이 숨쉬는 것처럼 보인다.
+            self._work_scale = min(1.0, self._work_scale + WORK_SCALE_STEP)
+            self._settle = SEG_SETTLE_FRAMES
 
     def reset_mask(self) -> None:
         """마스크와 케이던스 상태만 버린다 (배경 모드 전환 등)."""
@@ -209,6 +255,7 @@ class FrameProcessor:
         self._cost_ms = 0.0
         self._seg_cost_ms = 0.0
         self._seg_every = 1
+        self._work_scale = 1.0
         self._settle = 0
         self._warmed = False
 
@@ -229,13 +276,13 @@ class FrameProcessor:
     # -------------------------------------------------------------- 공통 --
 
     @staticmethod
-    def _downscale(bgr: np.ndarray) -> np.ndarray:
+    def _downscale(bgr: np.ndarray, target_width: int = WORK_WIDTH) -> np.ndarray:
         h, w = bgr.shape[:2]
-        if w <= WORK_WIDTH:
+        if w <= target_width:
             return bgr
-        scale = WORK_WIDTH / w
+        scale = target_width / w
         return cv2.resize(
-            bgr, (WORK_WIDTH, max(1, int(round(h * scale)))),
+            bgr, (target_width, max(1, int(round(h * scale)))),
             interpolation=cv2.INTER_AREA,
         )
 

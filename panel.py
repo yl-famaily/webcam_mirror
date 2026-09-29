@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import time
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import (
     QColor,
     QGuiApplication,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
     QButtonGroup,
+    QComboBox,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -582,6 +583,10 @@ class SettingsPanel(QWidget):
         self._build(body)
         self._card = card
         self.sync()
+        self._quality_timer = QTimer(self)
+        self._quality_timer.setInterval(1000)
+        self._quality_timer.timeout.connect(self._sync_quality_status)
+        self._quality_timer.start()
 
     # ------------------------------------------------------------ 구성 --
 
@@ -605,6 +610,23 @@ class SettingsPanel(QWidget):
         head.addStretch(1)
         head.addWidget(close)
         body.addLayout(head)
+
+        body.addWidget(_section("카메라 출력 모드"))
+        self.camera_mode = QComboBox()
+        self.camera_mode.setStyleSheet(
+            "QComboBox { border: 2px solid " + theme.CONTROL_BORDER + "; padding: 4px; }"
+            "QComboBox:focus { border: 2px solid " + theme.FOCUS + "; }")
+        self.camera_mode.setAccessibleName("카메라 출력 모드 선택")
+        self.camera_mode.currentIndexChanged.connect(
+            lambda _: ctl.set_camera_mode(self.camera_mode.currentData()))
+        body.addWidget(self.camera_mode)
+        self.quality_status = QLabel()
+        self.quality_status.setWordWrap(True)
+        body.addWidget(self.quality_status)
+        hint = QLabel("카메라가 지원한다고 알려준 해상도와 FPS 조합만 표시합니다. 변경하면 카메라를 다시 연결합니다. 인물 추적은 원본 일부를 잘라 확대합니다.")
+        hint.setWordWrap(True)
+        hint.setProperty("role", "hint")
+        body.addWidget(hint)
 
         # ── 인물 추적 ──────────────────────────────────
         body.addWidget(_section("인물 추적"))
@@ -732,9 +754,41 @@ class SettingsPanel(QWidget):
 
     # ------------------------------------------------------------ 동기화 --
 
+    def _sync_quality_status(self) -> None:
+        if self.isVisible():
+            self.quality_status.setText(self.ctl.camera_quality_status())
+
     def sync(self) -> None:
         """설정 -> 위젯. 신호를 막고 값만 넣어 되먹임을 피한다."""
         s = self.ctl.settings
+        blocked = self.camera_mode.blockSignals(True)
+        current = "%dx%d|%d|%s" % (
+            s.camera_width, s.camera_height, s.camera_fps, s.camera_fourcc)
+        modes = self.ctl.camera_modes()
+        wanted_items = [
+            ("%d×%d · %d FPS%s" % (
+                mode["width"], mode["height"], mode["fps"],
+                " · " + mode["fourcc"] if mode["fourcc"] else ""),
+             "%dx%d|%d|%s" % (mode["width"], mode["height"],
+                               mode["fps"], mode["fourcc"]))
+            for mode in modes
+        ]
+        existing = [self.camera_mode.itemData(i) for i in range(self.camera_mode.count())]
+        if existing != [data for _label, data in wanted_items]:
+            self.camera_mode.clear()
+            if wanted_items:
+                for label, data in wanted_items:
+                    self.camera_mode.addItem(label, data)
+            else:
+                self.camera_mode.addItem("자동 · 장치 기본 출력 사용", None)
+                self.camera_mode.setEnabled(False)
+        self.camera_mode.setEnabled(bool(wanted_items))
+        self.camera_mode.setToolTip(
+            "장치가 지원 모드를 알려 주지 않아 표준 목록을 대신 보여 줍니다. 고른 값을 장치가 못 맞추면 가장 가까운 모드로 열립니다."
+            if wanted_items and self.ctl.camera_modes_are_default() else "")
+        self.camera_mode.setCurrentIndex(self.camera_mode.findData(current))
+        self.camera_mode.blockSignals(blocked)
+        self.quality_status.setText(self.ctl.camera_quality_status())
         if self._has_model is None:  # 앱 수명 동안 안 바뀌는 값이라 한 번만 본다
             self._has_model = model_available()
         has_model = self._has_model

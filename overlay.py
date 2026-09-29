@@ -294,6 +294,15 @@ class OverlayWindow(QWidget):
             geo = self.geometry()
             self.s.x, self.s.y = geo.x(), geo.y()
             self.s.w, self.s.h = geo.width(), geo.height()
+            # 효과가 계산할 해상도는 **실제로 칠해지는 픽셀 수**로 정해야 한다.
+            # 250% 배율 화면에서는 494 논리픽셀 창이 1235 물리픽셀로 그려진다.
+            # 논리 크기만 보고 계산하면 그만큼 흐려진다. 두 값을 따로 저장하면
+            # 캡처 스레드가 새 폭과 낡은 높이를 함께 읽어 한 프레임짜리 엉뚱한
+            # 비율이 나올 수 있으므로 튜플 하나로 한 번에 발행한다.
+            # dataclass 필드가 아니라서 Settings.save() 의 asdict 에는 안 들어간다.
+            dpr = self.devicePixelRatioF() or 1.0
+            self.s.view_size = (max(1, round(geo.width() * dpr)),
+                                max(1, round(geo.height() * dpr)))
             self.s.placed = True
             self.settings_changed.emit()
         finally:

@@ -181,8 +181,17 @@ assert proc.process(frame) is frame                 # 꺼져 있으면 원본 �
 s3.skin_smooth, s3.skin_tone, s3.skin_bright = 60, 30, 25
 assert proc.enabled()
 out = proc.process(frame)
-assert out.shape[1] == effects.WORK_WIDTH, out.shape  # 작업 해상도로 축소됨
+# 처리 해상도는 캡처가 아니라 **창**이 정한다. 320x240 창에 1280x720 을 그대로
+# 통과시키면 보여 줄 수 없는 픽셀에 프레임 예산을 다 쓰게 되고, 그러면 예산을
+# 넘겨 낡은 마스크를 재사용하게 된다 — 그게 움직일 때의 잔상이었다.
+assert out.shape[1] < 1280, ("창보다 큰 해상도로 계산했다", out.shape)
+assert out.shape[1] >= s3.w, ("창을 채울 픽셀도 없다", out.shape, s3.w)
 assert out.dtype == np.uint8 and out.ndim == 3
+# 창을 키우면 해상도가 따라 올라가고, 원본보다 크게 확대하지는 않는다.
+s3.w, s3.h = 1400, 1050
+assert proc.process(frame).shape[1] > out.shape[1], "창을 키웠는데 안 따라온다"
+assert proc.process(frame).shape[1] <= 1280, "원본보다 크게 확대했다"
+s3.w, s3.h = 320, 240
 
 warm = effects.FrameProcessor._adjust_tone(np.full((40, 40, 3), 100, np.uint8), 50, 0)
 assert warm[0, 0, 2] > 100 and warm[0, 0, 0] < 100, warm[0, 0]
@@ -199,6 +208,12 @@ if effects.model_available():
         proc.reset()
         res = proc.process(frame)
         assert res.shape[2] == want_ch, (mode, res.shape)
+        # 크기는 창에 맞춘 처리 해상도를 그대로 유지해야 한다 (배경 처리가
+        # 몰래 더 줄이면 안 된다).
+        work = proc._downscale(frame, proc._work_width(frame.shape[1], frame.shape[0]))
+        assert res.shape[:2] == work.shape[:2], (mode, res.shape, work.shape)
+        if mode == settings.BG_TRANSPARENT:
+            assert np.array_equal(res[:, :, :3], work), "투명 배경에서도 색은 손대지 않는다"
         assert res.dtype == np.uint8
     print("bg modes OK (model present)")
 else:
@@ -285,21 +300,61 @@ if effects.model_available():
 
 # 7h) 케이던스: 모델 로딩 프레임(첫 프레임 100ms+)이 주기를 튀게 하면 안 된다.
 #     이게 없어서 실행할 때마다 20프레임 넘게 1/3 로만 추론하던 버그를 놓쳤다.
-s4 = settings.Settings(); s4.bg_mode = settings.BG_COLOR
+s4 = settings.Settings(); s4.bg_mode = settings.BG_COLOR; s4.camera_fps = 30
 p4 = effects.FrameProcessor(s4)
 p4._seg_cost_ms = 6.0
 p4._tune_cadence(117.0)                     # 모델 로딩이 섞인 첫 프레임
 for _ in range(60):
     p4._tune_cadence(18.0)                  # 예산에 한참 못 미치는 정상 프레임
-assert p4._seg_every == 1, ("로딩 프레임에 주기가 튀었다", p4._seg_every)
+assert p4._work_scale == 1.0, ("로딩 프레임에 해상도가 튀었다", p4._work_scale)
+assert p4._seg_every == 1, ("낡은 마스크를 쓰기 시작했다", p4._seg_every)
 
 # 데드밴드(22~30ms)에 갇히지 않고 돌아오는지
-p5 = effects.FrameProcessor(settings.Settings())
+s5 = settings.Settings(); s5.camera_fps = 30
+p5 = effects.FrameProcessor(s5)
 p5._seg_cost_ms = 6.0
 p5._tune_cadence(117.0)
 for i in range(300):
     p5._tune_cadence(24.0 + (6.0 if i % p5._seg_every == 0 else 0.0))
-assert p5._seg_every == 1, ("데드밴드에 갇혔다", p5._seg_every)
+assert p5._work_scale == 1.0, ("데드밴드에 갇혔다", p5._work_scale)
+
+# 같은 18ms 처리는 60fps의 16.7ms 예산에는 느리다. 이때 물러서는 곳은 추론
+# 주기가 아니라 **처리 해상도**여야 한다. 주기를 늘리면 낡은 마스크가 새 영상에
+# 씌워져 움직일 때 잔상이 남는다 — 해상도를 줄이면 조금 부드러워질 뿐이다.
+s60 = settings.Settings(); s60.camera_fps = 60
+p60 = effects.FrameProcessor(s60); p60._seg_cost_ms = 6.0
+p60._tune_cadence(117.0)
+for _ in range(60):
+    p60._tune_cadence(18.0)
+assert p60._work_scale < 1.0, ("60fps 예산에 맞춰 적응하지 않았다", p60._work_scale)
+assert p60._seg_every == 1, ("해상도 대신 마스크를 낡혔다", p60._seg_every)
+
+# 물러설 곳이 없어도(해상도 바닥) 마스크는 절대 낡히지 않는다.
+sfl = settings.Settings(); sfl.camera_fps = 60
+pfl = effects.FrameProcessor(sfl); pfl._seg_cost_ms = 6.0
+pfl._tune_cadence(117.0)
+for _ in range(400):
+    pfl._tune_cadence(200.0)                # 어떤 해상도로도 못 맞추는 부하
+assert pfl._work_scale == effects.WORK_SCALE_MIN, ("바닥까지 안 내려갔다", pfl._work_scale)
+assert pfl._seg_every == 1, ("과부하에서 마스크를 낡혔다", pfl._seg_every)
+
+# 처리 해상도는 캡처가 아니라 창 크기가 정한다 — 494 창에 1920 을 통과시키면
+# 보여 줄 수 없는 픽셀에 프레임 예산을 다 쓰고, 그게 잔상의 출발점이었다.
+sw = settings.Settings(); sw.w = sw.h = 494
+pw = effects.FrameProcessor(sw)
+assert pw._work_width(1920, 1440) < 1920, "창보다 큰 해상도로 계산하고 있다"
+assert pw._work_width(640, 480) == 640, "원본보다 크게 확대하면 안 된다"
+sw.w = sw.h = 1400
+assert pw._work_width(1920, 1440) > 988, "창을 키웠는데 해상도가 안 따라온다"
+
+# 고배율(HiDPI) 화면: 논리 크기가 아니라 실제로 칠해지는 물리 픽셀을 따라야
+# 한다. 250% 화면에서 494 논리픽셀 창은 1235 물리픽셀로 그려진다.
+sd = settings.Settings(); sd.w = sd.h = 494
+pd = effects.FrameProcessor(sd)
+logical_only = pd._work_width(1920, 1440)
+sd.view_size = (1235, 1235)                      # dpr 2.5
+assert pd._work_width(1920, 1440) > logical_only, "물리 픽셀을 무시하고 있다"
+assert pd._work_width(1920, 1440) >= 1235, "칠해지는 픽셀보다 낮은 해상도로 계산한다"
 
 # 7i) 인물 추적
 s6 = settings.Settings(); s6.track_enabled = True; s6.track_size = 5; s6.w = s6.h = 360
@@ -921,6 +976,29 @@ if os.path.exists(_ico):
 # 8) 단축키 등록/해제가 예외를 내지 않는지
 assert isinstance(ctl.hotkeys.failed, list)
 ctl.hotkeys.unregister_all()
+
+# 9) 중복 실행 차단 — 같은 이름으로 두 번 잡으면 두 번째는 실패해야 한다.
+# 앱이 실제로 쓰는 이름(SINGLE_INSTANCE_KEY)을 쓰면 안 된다. 지금 돌고 있는
+# 진짜 앱을 이 테스트가 "두 번째 인스턴스"로 만들어 깨워 버린다.
+_key = "WebcamMirror-SmokeTest-%d" % os.getpid()
+_first = winapi.SingleInstance(_key)
+assert _first.acquired, "첫 인스턴스는 잡혀야 한다"
+_second = winapi.SingleInstance(_key)
+assert not _second.acquired, "두 번째 인스턴스는 막혀야 한다"
+
+# 두 번째가 보낸 신호가 첫 번째에 도착하는지 (창을 띄우는 그 경로다)
+_woken = []
+_first.activated.connect(lambda: _woken.append(1))
+assert _second.notify_existing(), "첫 인스턴스를 깨우지 못했다"
+QTimer.singleShot(120, app.quit)
+app.exec()
+assert _woken, "activated 신호가 오지 않았다"
+
+# 풀고 나면 다시 잡을 수 있어야 한다 — 안 그러면 앱이 재실행 불가가 된다
+_first.release()
+_third = winapi.SingleInstance(_key)
+assert _third.acquired, "해제 뒤에는 다시 잡혀야 한다"
+_third.release()
 
 # 실제 설정 파일을 건드리지 않고 끝낸다
 ctl._save_timer.stop()

@@ -144,6 +144,18 @@ def size_for(aspect: str, long_edge: int, cur_w: int, cur_h: int) -> tuple[int, 
     return fit_to_ratio(0, long_edge, ratio, prefer_width=False)
 
 
+CAMERA_QUALITIES = {
+    "480p": (640, 480),
+    "720p": (1280, 720),
+    "1080p": (1920, 1080),
+    "2160p": (3840, 2160),
+}
+QUALITY_LABELS = {"480p": "480p · 640×480", "720p": "HD · 1280×720",
+                  "1080p": "Full HD · 1920×1080", "2160p": "4K · 3840×2160"}
+CAMERA_FPS_CHOICES = (15, 24, 30, 60)
+FPS_LABELS = {fps: "%d FPS" % fps for fps in CAMERA_FPS_CHOICES}
+
+
 @dataclass
 class Settings:
     # 창 위치/크기
@@ -186,6 +198,11 @@ class Settings:
     # 카메라
     camera_index: int = 0
     camera_name: str = ""
+    camera_quality: str = "720p"
+    camera_width: int = 1280
+    camera_height: int = 720
+    camera_fps: int = 30
+    camera_fourcc: str = ""
 
     # ------------------------------------------------------------------ #
 
@@ -223,6 +240,11 @@ class Settings:
             s.track_size = {"wide": 2, "normal": 5, "close": 8}.get(old_track, 5)
             s.track_speed = 6  # 구버전 이징과 같은 값
 
+        # 0.1.5 이하: 화질 이름만 저장했다. 실제 크기 필드로 옮긴다.
+        if "camera_width" not in raw or "camera_height" not in raw:
+            s.camera_width, s.camera_height = CAMERA_QUALITIES.get(
+                s.camera_quality, CAMERA_QUALITIES["720p"])
+
         s.sanitize()
         return s
 
@@ -248,6 +270,12 @@ class Settings:
             self.aspect = "free"
         if self.camera_index < 0:
             self.camera_index = 0
+        if self.camera_quality not in CAMERA_QUALITIES:
+            self.camera_quality = "720p"
+        self.camera_width = max(160, min(7680, int(self.camera_width)))
+        self.camera_height = max(120, min(4320, int(self.camera_height)))
+        self.camera_fps = max(1, min(240, int(self.camera_fps)))
+        self.camera_fourcc = str(self.camera_fourcc or "")[:4]
         self.skin_smooth = max(0, min(100, int(self.skin_smooth)))
         self.skin_tone = max(-50, min(50, int(self.skin_tone)))
         self.skin_bright = max(-50, min(50, int(self.skin_bright)))

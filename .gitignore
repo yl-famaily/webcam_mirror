@@ -24,3 +24,20 @@ _*.png
 # 팀 검토 산출물 (내부용)
 _pm_review*.md
 _approval*.md
+
+# MSIX 패키징 산출물 (build_msix.bat 이 만든다)
+dist_msix/
+build_msix/
+staging_msix/
+packaging/Assets/
+*.msix
+
+dist_msix_perf/
+
+build_msix_perf/
+dist_nuitka/
+deployment/
+pysidedeploy.spec
+*.build/
+*.dist/
+*.onefile-build/

@@ -275,6 +275,28 @@ def populate_menu(menu: QMenu, ctl) -> QMenu:
         )
 
     # -- 카메라 -------------------------------------------------------- #
+    mode_menu = _submenu(menu, "카메라 출력 모드")
+    mode_group = QActionGroup(mode_menu)
+    mode_group.setExclusive(True)
+    current_mode = (s.camera_width, s.camera_height, s.camera_fps, s.camera_fourcc)
+    modes = ctl.camera_modes()
+    if not modes:
+        unavailable = mode_menu.addAction("자동 · 장치 기본 출력 사용")
+        unavailable.setEnabled(False)
+    elif ctl.camera_modes_are_default():
+        # 장치가 알려 준 목록이 아니라는 걸 밝혀 둔다. 골랐는데 다른 해상도로
+        # 열리면 사용자는 앱이 고장 난 줄 안다.
+        hint = mode_menu.addAction("장치 정보를 못 읽어 기본 목록입니다")
+        hint.setEnabled(False)
+        mode_menu.addSeparator()
+    for mode in modes:
+        key = (mode["width"], mode["height"], mode["fps"], mode["fourcc"])
+        label = "%d×%d · %d FPS%s" % (
+            mode["width"], mode["height"], mode["fps"],
+            " · " + mode["fourcc"] if mode["fourcc"] else "")
+        _radio(mode_menu, mode_group, label, current_mode == key,
+               lambda *_, selected=key: ctl.set_camera_mode(selected))
+
     camera_menu = _submenu(menu, "카메라")
     cameras = ctl.cameras()
     if not cameras:
